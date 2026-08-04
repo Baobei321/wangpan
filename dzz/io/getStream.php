@@ -16,7 +16,8 @@ if(!$path = Decode($path,'read')){
     @header( 'Status: 403 Not Found' );
     exit('File not found');
 }
-
+//兼容老版本
+$path=str_replace('_3','',$path);
 
 $rid = $path;
 
@@ -24,14 +25,12 @@ $rid = $path;
 $ulevel = intval(getglobal('pichomelevel') );
 //是否获取真实文件地址
 
-
 if(strpos($path, 'attach::') === 0){
     $thumbpath = $path;
     $resourcesdata = IO::getMeta($path);
 }else {
     $resourcesdata = C::t('pichome_resources')->fetch($rid);
 }
-
 if(!$resourcesdata){
     exit('file is not exists');
 }
@@ -62,77 +61,83 @@ $mime = dzz_mime::get_type($ext);
 
 if (is_file($url)) {
     $name = $filename;
-    $start = 0;
     $total = filesize($url);
+
     header("Cache-Control: private, max-age=2592000, pre-check=2592000");
     header("Pragma: private");
     header("Expires: " . date(DATE_RFC822, strtotime(" 30 day")));
-    header('Last-Modified: ' . gmdate('D, d M Y H:i:s', filemtime($filename)) . ' GMT');
-    if (preg_match("/Firefox/", $_SERVER["HTTP_USER_AGENT"])) {
-        $attachment = 'attachment; filename*='.CHARSET.'\'\'' . $name;
-    } elseif (!preg_match("/Chrome/", $_SERVER["HTTP_USER_AGENT"]) && preg_match("/Safari/", $_SERVER["HTTP_USER_AGENT"])) {
-        $name = trim($name,'"');
-        $name = rawurlencode($name); // 注意：rawurlencode与urlencode的区别
-        $attachment = 'attachment; filename*='.CHARSET.'\'\'' . $name;
-    } else{
-        $attachment = 'attachment; filename='.$name;
+    $lastModified = @filemtime($url);
+    if ($lastModified) {
+        header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $lastModified) . ' GMT');
     }
 
-    // header('content-disposition:'.$attachment);
     if (isset($_SERVER['HTTP_RANGE'])) {
-        $range = str_replace('=', '-', $_SERVER['HTTP_RANGE']);
-        $range = explode('-', $range);
-        if (isset($range[2]) && intval($range[2]) > 0) {
-            $end = trim($range[2]);
+        $rangeHeader = trim($_SERVER['HTTP_RANGE']);
+        if (preg_match('/bytes=(\d*)-(\d*)/i', $rangeHeader, $matches)) {
+            $reqStart = ($matches[1] === '') ? null : intval($matches[1]);
+            $reqEnd   = ($matches[2] === '') ? null : intval($matches[2]);
+
+            $start = ($reqStart === null) ? 0 : $reqStart;
+            $end   = ($reqEnd === null) ? ($total - 1) : $reqEnd;
+
+            if ($start >= $total) {
+                header('HTTP/1.1 416 Requested Range Not Satisfiable');
+                header('Content-Range: bytes */' . $total);
+                exit();
+            }
+            if ($end >= $total) $end = $total - 1;
+            if ($end < $start) $end = $start;
+
+            $size = $end - $start + 1;
             header('HTTP/1.1 206 Partial Content');
-        } else {
-            $end = $total - 1;
-            header('HTTP/1.1 200 OK');
+            header('Accept-Ranges: bytes');
+            header('Content-Length:' . $size);
+            header('Content-Range: bytes ' . $start . '-' . $end . '/' . $total);
+            header('Content-Type:' . $mime);
+
+            $fp = fopen($url, 'rb');
+            if ($fp === false) {
+                exit('Cannot open file');
+            }
+            fseek($fp, $start, 0);
+            $cur = $start;
+            @ob_end_clean();
+            if (getglobal('gzipcompress')) @ob_start('ob_gzhandler');
+            while (!feof($fp) && $cur <= $end && (connection_status() == 0)) {
+                print fread($fp, min(1024 * 16, ($end - $cur) + 1));
+                $cur += 1024 * 16;
+                @ob_flush();
+                @flush();
+            }
+            fclose($fp);
+            exit();
         }
-        $start = trim($range[1]);
-        $size = $end - $start + 1;
-
-        //header('HTTP/1.1 206 Partial Content');
-        header('Content-Length:' . $size);
-        header('Content-Range: bytes ' . $start . '-' . $end . '/' . $total);
-
-    } else {
-        $size = $end = $total;
-        header('HTTP/1.1 200 OK');
-        header('Content-Length:' . $size);
-        header('Content-Range: bytes 0-' . ($total - 1) . '/' . $total);
     }
-    header('Accenpt-Ranges: bytes');
+
+    // ============ 非 Range 请求(完整下载) ============
+    header('HTTP/1.1 200 OK');
+    header('Accept-Ranges: bytes');
+    header('Content-Length:' . $total);
     header('Content-Type:' . $mime);
+
     $fp = fopen($url, 'rb');
-    fseek($fp, $start, 0);
-
-    $cur = $start;
-    @ob_end_clean();
-    if (getglobal('gzipcompress')) @ob_start('ob_gzhandler');
-    while (!feof($fp) && $cur <= $end && (connection_status() == 0)) {
-        print fread($fp, min(1024 * 16, ($end - $cur) + 1));
-        $cur += 1024 * 16;
+    if ($fp !== false) {
+        $cur = 0;
+        @ob_end_clean();
+        if (getglobal('gzipcompress')) @ob_start('ob_gzhandler');
+        while (!feof($fp) && $cur < $total && (connection_status() == 0)) {
+            print fread($fp, min(1024 * 16, $total - $cur));
+            $cur += 1024 * 16;
+            @ob_flush();
+            @flush();
+        }
+        fclose($fp);
     }
-
-    fclose($fp);
     exit();
 } else {
-    //$cachefile=$_G['siteurl']['attachdir'].'cache/'.play_cache_md5(file).'.'.$ext;
-    //$meta=IO::getMeta($path);
-    //$size=$meta['size'];
-
-    header("Cache-Control: private, max-age=2592000, pre-check=2592000");
-    header("Pragma: private");
-    header("Expires: " . date(DATE_RFC822, strtotime(" 30 day")));
-    header('Last-Modified: ' . gmdate('D, d M Y H:i:s', filemtime($url)) . ' GMT');
+    header('HTTP/1.1 302 Found');
+    header('Accept-Ranges: bytes');
     header('Content-Type: ' . $mime);
-    //header('Content-Length:'.$size);
-    //header('Content-Range: bytes 0-'.($size-1).'/'.$size);
-    @ob_end_clean();
-    if (getglobal('gzipcompress')) @ob_start('ob_gzhandler');
-    @readfile($url);
-    @flush();
-    @ob_flush();
+    header('Location: ' . $url);
     exit();
 }
